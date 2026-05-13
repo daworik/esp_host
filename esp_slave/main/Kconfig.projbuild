@@ -1,8 +1,43 @@
-menu "WiFi Configuration"
-    config WIFI_SSID
-        string "WiFi SSID"
-        default "Kudesn1c"
-    config WIFI_PASSWORD
-        string "WiFi Password"
-        default "99096526"
+menu "ESP-NOW Drone Agent Configuration"
+
+    config DRONE_AGENT_DEFAULT_ID
+        int "Default drone ID"
+        default 1
+        range 1 255
+        help
+            Default ID for this drone agent. Can be changed via CMD_SET_ID command.
+
+    config DRONE_HIVE_ENCRYPTION_KEY
+        string "ESP-NOW Encryption Key (32 bytes hex)"
+        default "1a2b3c4d5e6f7a8b9cadbecfd0e1f2031425364758697a8b9cadbecfd0e1f203"
+        help
+            PMK encryption key for ESP-NOW communication (64 hex characters = 32 bytes).
+            Must match the master controller.
+
+    config MOTOR_STEP_PIN
+        int "Motor STEP GPIO pin"
+        default 5
+        help
+            GPIO pin for motor STEP signal.
+
+    config MOTOR_DIR_PIN
+        int "Motor DIR GPIO pin"
+        default 6
+        help
+            GPIO pin for motor DIR signal.
+
+    config MOTOR_MAX_PPS
+        int "Maximum pulses per second"
+        default 2000
+        range 100 5000
+        help
+            Maximum motor speed in pulses per second.
+
+    config TELEMETRY_INTERVAL_MS
+        int "Telemetry reporting interval (ms)"
+        default 1000
+        range 100 10000
+        help
+            How often to send telemetry data to master.
+
 endmenu

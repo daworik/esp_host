@@ -1,50 +1,24 @@
-menu "Example Configuration"
+menu "ESP-NOW Drone Hive Configuration"
 
-    config EXAMPLE_WIFI_SSID
-        string "WiFi SSID"
-        default "ESP_EAP_FAST_AP"
+    config DRONE_HIVE_MAX_DRONES
+        int "Maximum number of drones"
+        default 10
+        range 1 20
         help
-            SSID (network name) for the example to connect to.
+            Maximum number of drone agents that can be controlled by this master.
 
-    choice
-        prompt "Enterprise configuration to be used"
-        default EXAMPLE_WPA3_ENTERPRISE
-        config EXAMPLE_WPA2_ENTERPRISE
-            bool "WPA2_ENT"
-        config EXAMPLE_WPA3_ENTERPRISE
-            bool "WPA3_ENT"
-    endchoice
-
-    if EXAMPLE_WPA2_ENTERPRISE
-        config EXAMPLE_VALIDATE_SERVER_CERT
-            bool "Validate server"
-            default y
-            help
-                Validate the servers' certificate using CA cert.
-    endif
-
-    if !EXAMPLE_WPA2_ENTERPRISE
-        config EXAMPLE_VALIDATE_SERVER_CERT
-            bool
-            default y
-    endif
-
-    config EXAMPLE_EAP_ID
-        string "EAP ID"
-        default "example@espressif.com"
+    config DRONE_HIVE_ENCRYPTION_KEY
+        string "ESP-NOW Encryption Key (32 bytes hex)"
+        default "1a2b3c4d5e6f7a8b9cadbecfd0e1f2031425364758697a8b9cadbecfd0e1f203"
         help
-            Identity in phase 1 of EAP procedure.
+            PMK encryption key for ESP-NOW communication (64 hex characters = 32 bytes).
+            Must match on all drones.
 
-    config EXAMPLE_EAP_USERNAME
-        string "EAP USERNAME"
-        default "espressif"
+    config DRONE_HEARTBEAT_TIMEOUT_MS
+        int "Drone heartbeat timeout (ms)"
+        default 3000
+        range 1000 10000
         help
-            Username for EAP method.
-
-    config EXAMPLE_EAP_PASSWORD
-        string "EAP PASSWORD"
-        default "test11"
-        help
-            Password for EAP method.
+            Time after which a drone is considered inactive if no telemetry received.
 
 endmenu
