@@ -1,21 +1,35 @@
 // master_drone_controller.c
-// ESP-NOW Drone Hive Controller with encryption, acknowledgments, and individual addressing
+// ESP-NOW Drone Hive Controller with Web Interface, encryption, acknowledgments, and individual addressing
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/uart.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_http_server.h"
 #include "nvs_flash.h"
 #include "esp_timer.h"
+#include "cJSON.h"
 
 #define TAG "MASTER"
 #define UART_NUM UART_NUM_0
 #define BUF_SIZE 256
+
+// LED for status indication
+#define LED_PIN GPIO_NUM_2
+
+// WiFi AP Configuration
+#define AP_SSID "DroneHive_AP"
+#define AP_PASSWORD "dronehive123"
+#define AP_CHANNEL 6
 
 // ESP-NOW Encryption Key (32 bytes for PMK)
 static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
@@ -30,6 +44,23 @@ static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
 #define DRONE_HEARTBEAT_TIMEOUT_MS 3000
 #define COMMAND_RETRY_COUNT 3
 #define COMMAND_TIMEOUT_MS 500
+
+// MAC addresses of drones - EDIT THESE WITH YOUR DRONE MAC ADDRESSES
+// Format: {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+// Find MAC addresses by flashing slave code and checking Serial Monitor output
+static const uint8_t drone_macs[MAX_DRONES][6] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 1 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 2 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 3 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 4 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 5 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 6 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 7 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 8 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 9 - REPLACE WITH ACTUAL MAC
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 10 - REPLACE WITH ACTUAL MAC
+};
+static uint8_t num_drones_configured = 0;  // Set to number of drones you have (1-10)
 
 // Message types
 typedef enum {
@@ -87,6 +118,9 @@ typedef struct {
     uint32_t last_heartbeat;
     uint8_t last_seq_num;
     int8_t rssi;
+    uint16_t uptime_sec;
+    int16_t speed;
+    char last_command[32];
 } drone_t;
 
 static drone_t drones[MAX_DRONES];
@@ -94,6 +128,7 @@ static uint8_t drone_count = 0;
 static uint8_t current_seq = 0;
 static QueueHandle_t ack_queue = NULL;
 static QueueHandle_t telemetry_queue = NULL;
+static httpd_handle_t server = NULL;
 
 typedef struct {
     uint8_t drone_id;
@@ -410,6 +445,326 @@ static void discovery_task(void *arg) {
     }
 }
 
+// CORS headers helper
+static esp_err_t cors(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    return ESP_OK;
+}
+
+// API: Get drone status
+static esp_err_t api_status_handler(httpd_req_t *req) {
+    cors(req);
+    if (req->method == HTTP_OPTIONS) {
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON *drones_arr = cJSON_CreateArray();
+    
+    uint32_t now = esp_timer_get_time() / 1000;
+    
+    for (int i = 0; i < drone_count; i++) {
+        cJSON *drone_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(drone_obj, "id", drones[i].id);
+        
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 drones[i].mac_addr[0], drones[i].mac_addr[1], drones[i].mac_addr[2],
+                 drones[i].mac_addr[3], drones[i].mac_addr[4], drones[i].mac_addr[5]);
+        cJSON_AddStringToObject(drone_obj, "mac", mac_str);
+        
+        bool lost = (now - drones[i].last_heartbeat) > DRONE_HEARTBEAT_TIMEOUT_MS;
+        cJSON_AddBoolToObject(drone_obj, "lost", lost);
+        cJSON_AddStringToObject(drone_obj, "status", lost ? "LOST SIGNAL" : "OK");
+        cJSON_AddNumberToObject(drone_obj, "rssi", drones[i].rssi);
+        cJSON_AddNumberToObject(drone_obj, "uptime", drones[i].uptime_sec);
+        cJSON_AddNumberToObject(drone_obj, "speed", drones[i].speed);
+        cJSON_AddStringToObject(drone_obj, "last_cmd", drones[i].last_command);
+        
+        cJSON_AddItemToArray(drones_arr, drone_obj);
+    }
+    
+    cJSON_AddItemToObject(root, "drones", drones_arr);
+    cJSON_AddNumberToObject(root, "count", drone_count);
+    
+    char *resp = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    free(resp);
+    return ESP_OK;
+}
+
+// API: Send command to drones
+static esp_err_t api_command_handler(httpd_req_t *req) {
+    if (req->method == HTTP_OPTIONS) {
+        cors(req);
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+    cors(req);
+    
+    if (req->method != HTTP_POST) {
+        httpd_resp_send_err(req, HTTPD_405_METHOD_NOT_ALLOWED, "Method not allowed");
+        return ESP_FAIL;
+    }
+    
+    char buf[256];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty request");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+    
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    cJSON *cmd_item = cJSON_GetObjectItem(json, "command");
+    cJSON *drone_id_item = cJSON_GetObjectItem(json, "drone_id");
+    cJSON *param1_item = cJSON_GetObjectItem(json, "param1");
+    cJSON *param2_item = cJSON_GetObjectItem(json, "param2");
+    
+    if (!cJSON_IsString(cmd_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing command");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
+    
+    uint8_t drone_id = 0;
+    if (cJSON_IsNumber(drone_id_item)) {
+        drone_id = (uint8_t)drone_id_item->valueint;
+    }
+    
+    int16_t param1 = cJSON_IsNumber(param1_item) ? (int16_t)param1_item->valueint : 0;
+    int16_t param2 = cJSON_IsNumber(param2_item) ? (int16_t)param2_item->valueint : 0;
+    
+    const char *cmd = cmd_item->valuestring;
+    uint8_t command = CMD_STOP;
+    
+    if (strcmp(cmd, "forward") == 0) command = CMD_FORWARD;
+    else if (strcmp(cmd, "backward") == 0) command = CMD_BACKWARD;
+    else if (strcmp(cmd, "stop") == 0) command = CMD_STOP;
+    else if (strcmp(cmd, "left") == 0) command = CMD_LEFT;
+    else if (strcmp(cmd, "right") == 0) command = CMD_RIGHT;
+    else if (strcmp(cmd, "speed") == 0) command = CMD_SET_SPEED;
+    else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown command");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
+    
+    // Update last_command for display
+    for (int i = 0; i < drone_count; i++) {
+        if (drone_id == 0 || drones[i].id == drone_id) {
+            snprintf(drones[i].last_command, sizeof(drones[i].last_command), "%s", cmd);
+        }
+    }
+    
+    esp_err_t err = send_command(drone_id, command, param1, param2);
+    cJSON_Delete(json);
+    
+    if (err == ESP_OK) {
+        httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
+    }
+    return err;
+}
+
+// Web page handler
+static const char webpage_html[] = R"rawliteral(<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Drone Hive Control</title>
+<style>
+body{font-family:Arial;background:#f0f0f0;padding:20px;text-align:center}
+.container{max-width:800px;margin:auto;background:#fff;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
+h1{color:#333}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin:20px 0}
+.drone-card{background:#f8f9fa;padding:15px;border-radius:8px;border-left:4px solid #28a745}
+.drone-card.lost{border-left-color:#dc3545;background:#fff5f5}
+.btn-group{margin:20px 0}
+button{padding:15px 30px;margin:5px;font-size:16px;border:none;border-radius:5px;cursor:pointer;color:#fff}
+.btn-fwd{background:#28a745}.btn-bwd{background:#dc3545}.btn-stop{background:#6c757d}
+.btn-left{background:#17a2b8}.btn-right{background:#17a2b8}
+select{padding:10px;font-size:16px;margin:10px}
+.error{color:#dc3545;font-weight:bold}
+.ok{color:#28a745}
+</style>
+</head>
+<body>
+<div class='container'>
+<h1>🚁 Drone Hive Control</h1>
+<p>Connect to WiFi: <b>DroneHive_AP</b> (password: dronehive123)</p>
+
+<h3>Drone Status</h3>
+<div class='status-grid' id='droneStatus'>Loading...</div>
+
+<h3>Send Commands</h3>
+<select id='droneSelect'>
+<option value='0'>All Drones</option>
+</select>
+<br>
+<div class='btn-group'>
+<button class='btn-fwd' ontouchstart='sendCmd("forward")' onmousedown='sendCmd("forward")'>⬆ FORWARD</button><br>
+<button class='btn-left' ontouchstart='sendCmd("left")' onmousedown='sendCmd("left")'>⬅ LEFT</button>
+<button class='btn-stop' ontouchstart='sendCmd("stop")' onmousedown='sendCmd("stop")'>⏹ STOP</button>
+<button class='btn-right' ontouchstart='sendCmd("right")' onmousedown='sendCmd("right")'>RIGHT ➡</button><br>
+<button class='btn-bwd' ontouchstart='sendCmd("backward")' onmousedown='sendCmd("backward")'>⬇ BACKWARD</button>
+</div>
+<p id='statusMsg'></p>
+</div>
+
+<script>
+let drones=[];
+
+function loadStatus(){
+    fetch('/api/status').then(r=>r.json()).then(d=>{
+        drones=d.drones||[];
+        updateStatusDisplay(d);
+        updateDroneSelect(d);
+    }).catch(e=>console.error('Status error:',e));
+}
+
+function updateStatusDisplay(data){
+    let html='';
+    (data.drones||[]).forEach(d=>{
+        let cls=d.lost?'drone-card lost':'drone-card';
+        html+=`<div class="${cls}">
+            <strong>Drone ${d.id}</strong><br>
+            MAC: ${d.mac}<br>
+            Status: <span class="${d.lost?'error':'ok'}">${d.status}</span><br>
+            RSSI: ${d.rssi} dBm<br>
+            Uptime: ${d.uptime}s<br>
+            Speed: ${d.speed}<br>
+            Last Cmd: ${d.last_cmd||'-'}
+        </div>`;
+    });
+    if(html==='')html='<p>No drones connected yet.</p>';
+    document.getElementById('droneStatus').innerHTML=html;
+}
+
+function updateDroneSelect(data){
+    let sel=document.getElementById('droneSelect');
+    let cur=sel.value;
+    sel.innerHTML='<option value="0">All Drones</option>';
+    (data.drones||[]).forEach(d=>{
+        sel.innerHTML+=`<option value="${d.id}">Drone ${d.id}</option>`;
+    });
+    if(cur!=='0')sel.value=cur;
+}
+
+function sendCmd(cmd){
+    let droneId=parseInt(document.getElementById('droneSelect').value)||0;
+    let msg=document.getElementById('statusMsg');
+    msg.textContent='Sending...';
+    msg.className='';
+    
+    fetch('/api/command',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({command:cmd,drone_id:droneId,param1:1500,param2:0})
+    })
+    .then(r=>r.json())
+    .then(d=>{
+        if(d.ok){msg.textContent='Command sent!';msg.className='ok';}
+        else{msg.textContent='Error!';msg.className='error';}
+    })
+    .catch(e=>{msg.textContent='Error: '+e;msg.className='error';});
+}
+
+setInterval(loadStatus,2000);
+loadStatus();
+</script>
+</body>
+</html>)rawliteral";
+
+static esp_err_t webpage_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req, webpage_html, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// Initialize WiFi AP and HTTP server
+static void wifi_ap_init(void) {
+    ESP_LOGI(TAG, "Initializing WiFi AP...");
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_ap();
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    
+    wifi_config_t wc = {
+        .ap = {
+            .ssid = AP_SSID,
+            .ssid_len = strlen(AP_SSID),
+            .channel = AP_CHANNEL,
+            .password = AP_PASSWORD,
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wc));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    ESP_LOGI(TAG, "WiFi AP started: %s", AP_SSID);
+    
+    // Blink LED to indicate AP ready
+    gpio_config_t led_cfg = {
+        .pin_bit_mask = (1ULL << LED_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&led_cfg);
+    for (int i = 0; i < 3; i++) {
+        gpio_set_level(LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        gpio_set_level(LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void start_http_server(void) {
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port = 80;
+    cfg.max_open_sockets = 7;
+    cfg.lru_purge_enable = true;
+    cfg.stack_size = 8192;
+    
+    if (httpd_start(&server, &cfg) == ESP_OK) {
+        httpd_register_uri_handler(server, &(httpd_uri_t){.uri = "/", .method = HTTP_GET, .handler = webpage_handler});
+        httpd_register_uri_handler(server, &(httpd_uri_t){.uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler});
+        httpd_register_uri_handler(server, &(httpd_uri_t){.uri = "/api/command", .method = HTTP_POST, .handler = api_command_handler});
+        httpd_register_uri_handler(server, &(httpd_uri_t){.uri = "/api/command", .method = HTTP_OPTIONS, .handler = api_command_handler});
+        httpd_register_uri_handler(server, &(httpd_uri_t){.uri = "/api/status", .method = HTTP_OPTIONS, .handler = api_status_handler});
+        ESP_LOGI(TAG, "HTTP server started on http://192.168.4.1");
+    } else {
+        ESP_LOGE(TAG, "Failed to start HTTP server");
+    }
+}
+
+// Heartbeat task - sends periodic heartbeats to all drones
+static void heartbeat_task(void *arg) {
+    while (1) {
+        // Send broadcast heartbeat to keep connections alive
+        send_command(0, CMD_STOP, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(500));  // Every 500ms
+    }
+}
+
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -423,17 +778,36 @@ void app_main(void) {
     
     // Initialize hardware
     uart_init();
+    
+    // Initialize WiFi AP first (needed for ESP-NOW in AP mode)
+    wifi_ap_init();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Initialize ESP-NOW
     espnow_master_init();
+    
+    // Register configured drones from MAC array
+    if (num_drones_configured > 0 && num_drones_configured <= MAX_DRONES) {
+        for (int i = 0; i < num_drones_configured; i++) {
+            add_drone(drone_macs[i], i + 1);
+        }
+        ESP_LOGI(TAG, "Registered %u pre-configured drones", num_drones_configured);
+    }
     
     // Create tasks
     xTaskCreate(command_parser_task, "cmd_parser", 4096, NULL, 5, NULL);
     xTaskCreate(ack_monitor_task, "ack_monitor", 4096, NULL, 4, NULL);
     xTaskCreate(telemetry_task, "telemetry", 4096, NULL, 3, NULL);
     xTaskCreate(discovery_task, "discovery", 3072, NULL, 2, NULL);
+    xTaskCreate(heartbeat_task, "heartbeat", 3072, NULL, 3, NULL);
+    
+    // Start HTTP server
+    vTaskDelay(pdMS_TO_TICKS(500));
+    start_http_server();
     
     ESP_LOGI(TAG, "Master controller ready");
-    ESP_LOGI(TAG, "Commands: takeoff, land, forward, backward, left, right, up, down, stop, speed [val], setid [new_id], discover");
+    ESP_LOGI(TAG, "Web interface: http://192.168.4.1");
+    ESP_LOGI(TAG, "Commands: forward, backward, left, right, stop, speed [val]");
     ESP_LOGI(TAG, "Format: COMMAND [DRONE_ID] [PARAM1] [PARAM2]");
     ESP_LOGI(TAG, "Example: forward 1 1500 0  (drone 1 forward at speed 1500)");
-    ESP_LOGI(TAG, "Example: speed 0 2000 0   (all drones speed 2000)");
 }

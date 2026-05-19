@@ -119,6 +119,7 @@ static int8_t last_rssi = -100;
 static uint8_t status_flags = 0;
 static esp_now_peer_info_t master_peer;
 static bool master_known = false;
+static uint32_t last_packet_time = 0;  // For fail-safe detection
 
 // Queue for sending telemetry
 static QueueHandle_t telemetry_queue = NULL;
@@ -175,13 +176,23 @@ static void update_motor_speed(int32_t speed) {
     motor.target_speed = speed;
 }
 
-// Motor control task with proper acceleration
+// Motor control task with proper acceleration and fail-safe
 static void motor_control_task(void *arg) {
     motor_t *m = (motor_t*) arg;
     TickType_t last_wake = xTaskGetTickCount();
     const TickType_t frequency = pdMS_TO_TICKS(50);  // 20 Hz update rate
     
     while (1) {
+        // Fail-safe: Check if signal lost for more than 1 second
+        uint32_t now = esp_timer_get_time() / 1000;
+        if (last_packet_time > 0 && (now - last_packet_time) > 1000) {
+            // Signal lost - stop motors
+            if (m->target_speed != 0) {
+                ESP_LOGW(TAG, "FAIL-SAFE: Signal lost, stopping motors");
+                m->target_speed = 0;
+            }
+        }
+        
         int32_t diff = m->target_speed - m->current_speed;
         
         if (diff != 0) {
@@ -275,6 +286,9 @@ static void send_telemetry(void) {
         return;
     }
     
+    uint32_t now = esp_timer_get_time() / 1000;
+    bool signal_lost = (last_packet_time > 0 && (now - last_packet_time) > 1000);
+    
     telemetry_message_t telemetry;
     telemetry.msg_type = MSG_TYPE_TELEMETRY;
     telemetry.drone_id = my_drone_id;
@@ -282,8 +296,8 @@ static void send_telemetry(void) {
     telemetry.speed = motor.current_speed;
     telemetry.uptime_sec = (esp_timer_get_time() / 1000000) - start_time;
     telemetry.rssi = last_rssi;
-    telemetry.status_flags = status_flags;
-    telemetry.timestamp = esp_timer_get_time() / 1000;
+    telemetry.status_flags = signal_lost ? 0x01 : 0x00;  // Bit 0 = signal lost flag
+    telemetry.timestamp = now;
     
     esp_now_send(master_peer.peer_addr, (uint8_t*)&telemetry, sizeof(telemetry));
 }
@@ -310,6 +324,9 @@ static void send_discovery_response(const uint8_t *sender_mac) {
 
 // Process received command
 static void process_command(const uint8_t *sender_mac, const drone_message_t *msg) {
+    // Update last packet time for fail-safe
+    last_packet_time = esp_timer_get_time() / 1000;
+    
     // Register master on first contact
     if (!master_known) {
         memcpy(master_peer.peer_addr, sender_mac, 6);
