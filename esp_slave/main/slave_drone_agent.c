@@ -394,7 +394,7 @@ static void process_command(const uint8_t *sender_mac, const drone_message_t *ms
 // ESP-NOW receive callback
 static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len) {
     const uint8_t *mac = recv_info->src_addr;
-    last_rssi = recv_info->rssi;
+  
     
     if (data_len < sizeof(drone_message_t)) {
         ESP_LOGW(TAG, "Packet too small: %d", data_len);

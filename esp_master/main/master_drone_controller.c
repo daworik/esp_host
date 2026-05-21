@@ -49,16 +49,7 @@ static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
 // Format: {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 // Find MAC addresses by flashing slave code and checking Serial Monitor output
 static const uint8_t drone_macs[MAX_DRONES][6] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 1 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 2 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 3 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 4 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 5 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 6 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 7 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 8 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 9 - REPLACE WITH ACTUAL MAC
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // Drone 10 - REPLACE WITH ACTUAL MAC
+    {0xac, 0xeb, 0xe6, 0x55, 0xf1, 0xe4}
 };
 static uint8_t num_drones_configured = 0;  // Set to number of drones you have (1-10)
 
@@ -199,15 +190,20 @@ static void add_drone(const uint8_t *mac, uint8_t id) {
 }
 
 // Send data with encryption
-static esp_err_t send_encrypted(const uint8_t *mac, const void *data, size_t len) {
+// Send data with optional encryption
+static esp_err_t send_data(const uint8_t *mac, const void *data, size_t len, bool encrypt) {
     esp_now_peer_info_t peer = {
         .peer_addr = {0},
         .channel = 0,
         .ifidx = ESP_IF_WIFI_STA,
-        .encrypt = true,
+        .encrypt = encrypt,
     };
     memcpy(peer.peer_addr, mac, 6);
-    memcpy(peer.lmk, esp_now_key, ESP_NOW_KEY_LEN);
+
+     // Only set LMK if encryption is enabled
+    if (encrypt) {
+        memcpy(peer.lmk, esp_now_key, ESP_NOW_KEY_LEN);
+    }
     
     // Check if peer exists, add if not
     if (!esp_now_is_peer_exist(mac)) {
@@ -215,6 +211,16 @@ static esp_err_t send_encrypted(const uint8_t *mac, const void *data, size_t len
     }
     
     return esp_now_send(mac, data, len);
+}
+
+static esp_err_t send_encrypted(const uint8_t *mac, const void *data, size_t len) {
+    return send_data(mac, data, len, true);
+}
+
+// Send unencrypted broadcast
+static esp_err_t send_broadcast(const void *data, size_t len) {
+    uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    return send_data(broadcast_mac, data, len, false);
 }
 
 // Send command to drone(s)
@@ -228,11 +234,10 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
     msg.param2 = param2;
     msg.timestamp = esp_timer_get_time() / 1000;
     
-    uint8_t dest_mac[6];
     
     if (drone_id == 0) {
         // Broadcast
-        memset(dest_mac, 0xFF, 6);
+     
         ESP_LOGI(TAG, "Broadcast command: %u, params=(%d, %d)", command, param1, param2);
     } else {
         // Individual drone
@@ -248,7 +253,12 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
     
     // Send with retries
     for (int retry = 0; retry < COMMAND_RETRY_COUNT; retry++) {
-        esp_err_t err = send_encrypted(dest_mac, &msg, sizeof(msg));
+        esp_err_t err;
+        if (drone_id == 0) {
+            err = send_broadcast(&msg, sizeof(msg));
+        } else {
+            err = send_encrypted(drones[find_drone_by_id(drone_id)].mac_addr, &msg, sizeof(msg));
+        }
         if (err == ESP_OK) {
             return ESP_OK;
         }
@@ -319,13 +329,7 @@ static void process_telemetry(const uint8_t *mac, const telemetry_message_t *msg
 
 // Initialize ESP-NOW Master
 static void espnow_master_init(void) {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
     
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
     
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_set_pmk(esp_now_key));
