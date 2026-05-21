@@ -426,6 +426,7 @@ static void espnow_slave_init(void) {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
     
     ESP_ERROR_CHECK(esp_now_init());
@@ -434,16 +435,15 @@ static void espnow_slave_init(void) {
     
     // Configure peer for encrypted communication
     memset(&master_peer, 0, sizeof(master_peer));
-    master_peer.channel = 0;
+    master_peer.channel = 6;
     master_peer.ifidx = ESP_IF_WIFI_STA;
     master_peer.encrypt = false;
     memcpy(master_peer.lmk, esp_now_key, ESP_NOW_KEY_LEN);
     
     start_time = esp_timer_get_time() / 1000000;
     
-    ESP_LOGI(TAG, "ESP-NOW agent ready (ID=%u)", my_drone_id);
+    ESP_LOGI(TAG, "ESP-NOW agent ready (ID=%u) on channel 6", my_drone_id);
 }
-
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

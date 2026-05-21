@@ -191,8 +191,8 @@ static void add_drone(const uint8_t *mac, uint8_t id) {
 static esp_err_t send_data(const uint8_t *mac, const void *data, size_t len, bool encrypt) {
     esp_now_peer_info_t peer = {
         .peer_addr = {0},
-        .channel = 0,
-        .ifidx = ESP_IF_WIFI_STA,
+        .channel = AP_CHANNEL,
+        .ifidx = ESP_IF_WIFI_AP,
         .encrypt = encrypt,
     };
     memcpy(peer.peer_addr, mac, 6);
@@ -204,7 +204,11 @@ static esp_err_t send_data(const uint8_t *mac, const void *data, size_t len, boo
     
     // Check if peer exists, add if not
     if (!esp_now_is_peer_exist(mac)) {
-        esp_now_add_peer(&peer);
+        esp_err_t err = esp_now_add_peer(&peer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add peer: %d", err);
+            return err;
+        }
     }
     
     return esp_now_send(mac, data, len);
@@ -217,7 +221,7 @@ static esp_err_t send_encrypted(const uint8_t *mac, const void *data, size_t len
 // Send unencrypted broadcast
 static esp_err_t send_broadcast(const void *data, size_t len) {
     uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    return send_data(broadcast_mac, data, len, false);
+     return esp_now_send(broadcast_mac, data, len);
 }
 
 // Send command to drone(s)
@@ -234,7 +238,7 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
     
     if (drone_id == 0) {
         // Broadcast
-     
+        
         ESP_LOGI(TAG, "Broadcast command: %u, params=(%d, %d)", command, param1, param2);
     } else {
         // Individual drone
@@ -251,12 +255,24 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
     for (int retry = 0; retry < COMMAND_RETRY_COUNT; retry++) {
         esp_err_t err;
         if (drone_id == 0) {
+             // Broadcast - send to all drones
+            ESP_LOGD(TAG, "Sending broadcast (retry %d/%d)", retry + 1, COMMAND_RETRY_COUNT);
             err = send_broadcast(&msg, sizeof(msg));
         } else {
-            err = send_encrypted(drones[find_drone_by_id(drone_id)].mac_addr, &msg, sizeof(msg));
+            // Individual drone
+            int idx = find_drone_by_id(drone_id);
+            if (idx < 0) {
+                ESP_LOGE(TAG, "Drone ID %u not found", drone_id);
+                return ESP_ERR_NOT_FOUND;
+            }
+            ESP_LOGD(TAG, "Sending to drone %u (retry %d/%d)", drone_id, retry + 1, COMMAND_RETRY_COUNT);
+            err = send_encrypted(drones[idx].mac_addr, &msg, sizeof(msg));
         }
         if (err == ESP_OK) {
+            ESP_LOGD(TAG, "Send successful");
             return ESP_OK;
+        } else {
+            ESP_LOGW(TAG, "Send failed with error %d (retry %d/%d)", err, retry + 1, COMMAND_RETRY_COUNT);
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
