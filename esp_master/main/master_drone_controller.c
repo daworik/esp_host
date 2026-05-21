@@ -31,11 +31,9 @@
 #define AP_PASSWORD "dronehive123"
 #define AP_CHANNEL 6
 
-// ESP-NOW Encryption Key (32 bytes for PMK)
+// ESP-NOW Encryption Key (16 bytes for PMK)
 static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
     0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
-    0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03,
-    0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a, 0x8b,
     0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03
 };
 
@@ -189,7 +187,6 @@ static void add_drone(const uint8_t *mac, uint8_t id) {
              id, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-// Send data with encryption
 // Send data with optional encryption
 static esp_err_t send_data(const uint8_t *mac, const void *data, size_t len, bool encrypt) {
     esp_now_peer_info_t peer = {
@@ -246,7 +243,6 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
             ESP_LOGE(TAG, "Drone ID %u not found", drone_id);
             return ESP_ERR_NOT_FOUND;
         }
-        memcpy(dest_mac, drones[idx].mac_addr, 6);
         ESP_LOGI(TAG, "Command to drone %u: %u, params=(%d, %d)", 
                  drone_id, command, param1, param2);
     }

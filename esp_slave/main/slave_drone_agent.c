@@ -36,8 +36,6 @@
 // ESP-NOW Encryption Key (MUST match master)
 static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
     0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
-    0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03,
-    0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a, 0x8b,
     0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03
 };
 
@@ -438,7 +436,7 @@ static void espnow_slave_init(void) {
     memset(&master_peer, 0, sizeof(master_peer));
     master_peer.channel = 0;
     master_peer.ifidx = ESP_IF_WIFI_STA;
-    master_peer.encrypt = true;
+    master_peer.encrypt = false;
     memcpy(master_peer.lmk, esp_now_key, ESP_NOW_KEY_LEN);
     
     start_time = esp_timer_get_time() / 1000000;
