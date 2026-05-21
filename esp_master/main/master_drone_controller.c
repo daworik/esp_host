@@ -49,7 +49,7 @@ static const uint8_t esp_now_key[ESP_NOW_KEY_LEN] = {
 static const uint8_t drone_macs[MAX_DRONES][6] = {
     {0xac, 0xeb, 0xe6, 0x55, 0xf1, 0xe4}
 };
-static uint8_t num_drones_configured = 0;  // Set to number of drones you have (1-10)
+static uint8_t num_drones_configured = 1;  // Set to number of drones you have (1-10)
 
 // Message types
 typedef enum {
@@ -221,7 +221,23 @@ static esp_err_t send_encrypted(const uint8_t *mac, const void *data, size_t len
 // Send unencrypted broadcast
 static esp_err_t send_broadcast(const void *data, size_t len) {
     uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-     return esp_now_send(broadcast_mac, data, len);
+    for (int i = 0; i < drone_count; i++) {
+        if (!esp_now_is_peer_exist(drones[i].mac_addr)) {
+            esp_now_peer_info_t peer = {
+                .peer_addr = {0},
+                .channel = AP_CHANNEL,
+                .ifidx = ESP_IF_WIFI_AP,
+                .encrypt = true,
+            };
+            memcpy(peer.peer_addr, drones[i].mac_addr, 6);
+            memcpy(peer.lmk, esp_now_key, ESP_NOW_KEY_LEN);
+            esp_err_t err = esp_now_add_peer(&peer);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to add peer for broadcast: %d", err);
+            }
+        }
+    }
+    return esp_now_send(broadcast_mac, data, len);
 }
 
 // Send command to drone(s)
@@ -257,6 +273,13 @@ static esp_err_t send_command(uint8_t drone_id, uint8_t command, int16_t param1,
         if (drone_id == 0) {
              // Broadcast - send to all drones
             ESP_LOGD(TAG, "Sending broadcast (retry %d/%d)", retry + 1, COMMAND_RETRY_COUNT);
+
+            if (num_drones_configured > 0 && drone_count == 0) {
+                for (int i = 0; i < num_drones_configured; i++) {
+                    add_drone(drone_macs[i], i + 1);
+                }
+            }
+
             err = send_broadcast(&msg, sizeof(msg));
         } else {
             // Individual drone
@@ -347,7 +370,7 @@ static void espnow_master_init(void) {
     ESP_ERROR_CHECK(esp_now_set_pmk(esp_now_key));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(esp_now_recv_cb));
     
-    ESP_LOGI(TAG, "ESP-NOW master initialized with encryption");
+    ESP_LOGI(TAG, "ESP-NOW master initialized with encryption on channel %d", AP_CHANNEL);
 }
 
 // Command parser task
