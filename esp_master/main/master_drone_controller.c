@@ -365,7 +365,8 @@ static void process_telemetry(const uint8_t *mac, const telemetry_message_t *msg
 // Initialize ESP-NOW Master
 static void espnow_master_init(void) {
     
-    
+    ESP_ERROR_CHECK(esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE));
+
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_set_pmk(esp_now_key));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(esp_now_recv_cb));
